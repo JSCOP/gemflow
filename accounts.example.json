@@ -1,0 +1,14 @@
+{
+  "accounts": [
+    {
+      "name": "my-google-account",
+      "tier": "ultra",
+      "profile_dir": "./gemini_profiles/my-google-account"
+    },
+    {
+      "name": "my-second-account",
+      "tier": "pro",
+      "profile_dir": "./gemini_profiles/my-second-account"
+    }
+  ]
+}
