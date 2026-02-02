@@ -1,0 +1,111 @@
+/* Gemini Image Generator TUI Styles */
+
+Screen {
+    background: $surface;
+}
+
+#title-bar {
+    dock: top;
+    height: 1;
+    background: $primary;
+    color: $text;
+    text-align: center;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#status-bar {
+    dock: bottom;
+    height: 1;
+    background: $panel;
+    color: $text-muted;
+    padding: 0 1;
+}
+
+#prompt-container {
+    height: auto;
+    padding: 1;
+}
+
+#prompt-input {
+    width: 1fr;
+}
+
+#queue-table {
+    height: 1fr;
+    margin: 0 1;
+}
+
+.btn-row {
+    height: auto;
+    align: center middle;
+    padding: 1;
+}
+
+.btn-row Button {
+    margin: 0 1;
+}
+
+/* Account screen */
+#account-table {
+    height: 1fr;
+    margin: 0 1;
+}
+
+#add-input {
+    width: 40;
+    margin: 0 1;
+}
+
+/* Settings screen */
+.setting-row {
+    height: auto;
+    padding: 0 2;
+    margin: 1 0;
+}
+
+.setting-row Label {
+    width: 20;
+    padding: 1 0;
+}
+
+.setting-row Input {
+    width: 1fr;
+}
+
+/* Login screen */
+#login-message {
+    text-align: center;
+    margin: 2;
+    text-style: bold;
+}
+
+#login-status {
+    text-align: center;
+    margin: 1;
+    color: $warning;
+}
+
+#login-instruction {
+    text-align: center;
+    margin: 1;
+    color: $accent;
+}
+
+/* Batch modal */
+BatchScreen {
+    align: center middle;
+}
+
+#batch-container {
+    width: 80%;
+    height: 80%;
+    background: $surface;
+    border: solid $accent;
+    padding: 1;
+}
+
+#batch-input {
+    height: 1fr;
+    margin: 1 0;
+}

@@ -1,0 +1,46 @@
+# Chrome profiles (login sessions)
+gemini_profile/
+gemini_profiles/
+
+# Generated images
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Caches
+.ruff_cache/
+
+# Account data
+accounts.json
+
+# Debug artifacts
+debug_*.py
+debug_*.png
+debug_*.log
+
+# Logs
+*.log
+
+# OpenCode
+.opencode/
+.opencode/node_modules/
+.opencode/bun.lock
+
+# Misc
+nul
+.sisyphus/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
