@@ -304,7 +304,11 @@ class FlowImageGenerator:
         2. Set file on the hidden input[type='file'] → triggers upload
         3. "Crop your ingredient" modal appears with crop tool
         4. Click "Crop and Save" to confirm → image attached as reference
-        5. Reference thumbnail appears near the prompt textarea
+        5. Wait for thumbnail to appear near textarea
+
+        IMPORTANT: After crop & save, the reference is automatically attached.
+        The uploaded image appears at picker index 1 (right after Upload button).
+        For subsequent prompts, we simply click index 1 to reattach.
 
         Returns error message or None on success.
         """
@@ -344,12 +348,7 @@ class FlowImageGenerator:
                 "Crop and Save button not found — reference image may not have uploaded"
             )
 
-        # Wait for the crop modal to close AND the reference thumbnail to appear.
-        # After "Crop and Save", the ingredient picker modal fades out and the
-        # reference thumbnail appears as a small button with a data:image/...
-        # CSS background-image near the textarea.  This takes ~10s in practice.
-
-        # Phase 1: wait for crop modal to close
+        # Wait for the crop modal to close
         for _ in range(15):
             await asyncio.sleep(1)
             still_open = False
@@ -364,35 +363,38 @@ class FlowImageGenerator:
             if not still_open:
                 break
 
-        # Phase 2: poll for reference thumbnail to appear (data:image background)
+        # Poll for reference thumbnail to appear near textarea
         thumbnail_ready = False
-        for _ in range(20):
+        for _ in range(15):
             await asyncio.sleep(1)
             try:
                 thumbnail_ready = await self.page.evaluate("""() => {
-                    // Reference thumbnail is a small button with data:image CSS bg
                     const els = document.querySelectorAll('button, div');
                     for (const el of els) {
                         if (el.offsetParent === null && el.offsetWidth === 0) continue;
+                        if (el.offsetWidth > 100 || el.offsetHeight > 100) continue;
+                        if (el.offsetWidth < 20) continue;
                         const bg = getComputedStyle(el).backgroundImage;
-                        if (bg && bg.startsWith('url("data:image/')) {
-                            // Found a data:image background — thumbnail is ready
+                        if (bg && bg !== 'none' &&
+                            (bg.startsWith('url("data:image/') ||
+                             bg.includes('storage.googleapis.com'))) {
                             return true;
                         }
                     }
                     return false;
                 }""")
+                if thumbnail_ready:
+                    break
             except Exception:
                 pass
-            if thumbnail_ready:
-                break
 
-        if not thumbnail_ready:
-            print("  Warning: Reference thumbnail did not appear within 20s")
-        # Small buffer after thumbnail appears
-        await asyncio.sleep(1)
+        if thumbnail_ready:
+            print(f"  Uploaded reference image: {resolved.name}")
+        else:
+            print(
+                f"  Uploaded reference image: {resolved.name} (thumbnail not confirmed)"
+            )
 
-        print(f"  Uploaded reference image: {resolved.name}")
         return None
 
     async def _clear_reference_images(self) -> None:
@@ -419,16 +421,16 @@ class FlowImageGenerator:
     async def _reattach_reference_from_picker(self) -> str | None:
         """Re-attach a reference image from the ingredient picker.
 
-        After each generation Flow removes the attached reference.  This
-        method opens the ingredient picker and clicks the **first image
-        tile** (right after the "Upload" tile) which is the most recently
-        used ingredient.
+        After each generation Flow removes the attached reference. This method
+        opens the ingredient picker and clicks the uploaded reference tile.
 
-        The picker grid layout (from the screenshot):
-          [ Upload ] [ most-recent img ] [ 2nd img ] [ 3rd img ] …
+        IMPORTANT DISCOVERY (via Chrome DevTools analysis):
+        - Uploaded reference images appear at picker index 1 (right after Upload button)
+        - Generated images do NOT get added to the picker
+        - The uploaded reference stays at index 1 throughout the session
+        - URL matching is unreliable because uploads initially have data:image URLs
 
-        Picker tiles are ~144×144 px.  Canvas images on the page are much
-        larger, so we filter by size to avoid mis-clicks.
+        Therefore, we simply click index 1 (the tile right after Upload button).
 
         Returns error message or None on success.
         """
@@ -437,36 +439,41 @@ class FlowImageGenerator:
         try:
             await add_btn.wait_for(state="visible", timeout=5_000)
             await add_btn.click()
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
         except Exception:
             return "Add reference button not found for re-attach"
 
-        # Click the first ~144×144 button with a GCS background-image.
-        # This skips the Upload tile (no GCS bg) and canvas images (>> 144px).
+        # Click the tile at index 1 (right after Upload button)
+        # This is where the uploaded reference image always appears
         clicked = await self.page.evaluate("""() => {
-            const btns = document.querySelectorAll('button');
+            const menu = document.querySelector('[role="menu"]');
+            if (!menu) return { clicked: false, error: 'No menu found' };
+
+            const btns = menu.querySelectorAll('button');
+            let tileIndex = 0;
+
             for (const btn of btns) {
-                if (btn.offsetParent === null && btn.offsetWidth === 0) continue;
-                // Picker tiles are roughly 120-160 px square
-                if (btn.offsetWidth < 100 || btn.offsetWidth > 200) continue;
-                if (btn.offsetHeight < 100 || btn.offsetHeight > 200) continue;
-                const bg = getComputedStyle(btn).backgroundImage;
-                if (bg && bg !== 'none' && bg.includes('storage.googleapis.com')) {
+                const rect = btn.getBoundingClientRect();
+                // Filter to only large tiles (100-200px)
+                if (rect.width < 100 || rect.width > 200) continue;
+                if (rect.height < 100 || rect.height > 200) continue;
+
+                // Skip index 0 (Upload button), click index 1 (uploaded reference)
+                if (tileIndex === 1) {
                     btn.click();
-                    return true;
+                    return { clicked: true, tileIndex: 1 };
                 }
+                tileIndex++;
             }
-            return false;
+            return { clicked: false, error: 'Index 1 tile not found' };
         }""")
 
-        if not clicked:
+        if not clicked.get("clicked"):
             await self.page.keyboard.press("Escape")
             await asyncio.sleep(1)
-            return "No ingredient tile found in picker"
+            return clicked.get("error", "No ingredient tile found in picker")
 
-        # Wait for the picker to close and the thumbnail to appear.
-        # The thumbnail is a small button (≈64×40) with a GCS or data:image
-        # background near the textarea.
+        # Wait for the picker to close and the thumbnail to appear
         thumbnail_ready = False
         for _ in range(10):
             await asyncio.sleep(1)
@@ -491,7 +498,7 @@ class FlowImageGenerator:
         if not thumbnail_ready:
             print("  Warning: Reference thumbnail did not appear after re-attach")
         else:
-            print("  Re-attached reference from ingredient picker")
+            print("  Re-attached reference from ingredient picker (index 1)")
         await asyncio.sleep(1)
         return None
 
@@ -758,6 +765,8 @@ class FlowImageGenerator:
             result = await self.generate(prompt, reference_image=ref_for_this)
             if reference_image and not ref_uploaded and result.success:
                 ref_uploaded = True
+                # URL is now captured during upload via before/after diff
+                # No fallback capture needed here
 
             if result.success:
                 print(f"  ✓ Got {len(result.image_urls)} image(s)")
