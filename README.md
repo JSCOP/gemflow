@@ -13,7 +13,7 @@
 
 Generate hundreds of images across Google's Gemini and Flow (ImageFX) platforms using actual Chrome browsers with your logged-in Google accounts.
 
-[Features](#-features) · [Quick Start](#-quick-start) · [Architecture](#-architecture) · [Usage](#-usage) · [Reference Images](#-reference-images)
+[Features](#-features) · [Quick Start](#-quick-start) · [Architecture](#-architecture) · [Usage](#-usage) · [AI Integration](#ai-coding-assistant-integration)
 
 </div>
 
@@ -315,6 +315,326 @@ gemflow uses several strategies to avoid bot detection:
 - **Requires Google account** — must be logged in with a real account
 - **Generation speed** — limited by Google's actual generation time (~20-30s per prompt)
 - **Content policy** — Google's content filters still apply; copyrighted characters will be refused
+
+---
+
+## AI Coding Assistant Integration
+
+gemflow can be integrated with AI coding assistants like **OpenCode**, **Claude Code**, **Cline**, and similar tools that support custom tools/skills.
+
+### Overview
+
+The integration consists of three parts:
+
+| Component | Purpose | Location |
+|-----------|---------|----------|
+| **Worker Scripts** | CLI wrappers that call the automation | `workers/` or project root |
+| **Tool Definitions** | Schema + execution logic for AI tools | `~/.config/opencode/tools/` |
+| **Skill Files** | Usage instructions for the AI | `~/.config/opencode/skills/` |
+
+### 1. Worker Scripts
+
+Create thin CLI wrappers that the AI tools can execute:
+
+**`flow_worker.py`** — Flow image generation wrapper:
+
+```python
+#!/usr/bin/env python3
+"""Flow image generation worker for AI tool integration."""
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+# Add project to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from gemini_automation.flow_generator import FlowImageGenerator, FlowImageDownloader
+from gemini_automation.flow_config import FlowConfig, TIER_ACCOUNTS
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Flow image generation worker")
+    parser.add_argument("--tier", required=True, choices=["ultra", "pro", "all"])
+    parser.add_argument("--prompts", nargs="+", required=True)
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--project-name", type=str, default=None)
+    parser.add_argument("--reference-image", type=str, default=None)
+    args = parser.parse_args()
+
+    tiers = ["ultra", "pro"] if args.tier == "all" else [args.tier]
+    all_results = {}
+
+    for tier in tiers:
+        account = TIER_ACCOUNTS.get(tier)
+        if not account:
+            print(json.dumps({"error": f"No account configured for tier: {tier}"}))
+            return 1
+
+        config = FlowConfig.for_account(account)
+        if args.output_dir:
+            config.output_dir = args.output_dir / f"flow_{tier}"
+
+        async with FlowImageGenerator(config) as generator:
+            results = await generator.generate_batch(
+                prompts=args.prompts,
+                project_name=args.project_name,
+                reference_image_path=args.reference_image,
+            )
+            downloader = FlowImageDownloader(generator.page, config)
+            
+            tier_results = []
+            for result in results:
+                entry = {"prompt": result.prompt, "success": result.success, "images": []}
+                if result.success:
+                    dl = await downloader.download_all(result)
+                    entry["images"] = [str(p) for p in dl.saved_files]
+                else:
+                    entry["error"] = result.error
+                tier_results.append(entry)
+            all_results[tier] = tier_results
+
+    print(json.dumps(all_results, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+```
+
+**`gemini_worker.py`** — Gemini image generation wrapper:
+
+```python
+#!/usr/bin/env python3
+"""Gemini image generation worker for AI tool integration."""
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from gemini_automation.accounts import AccountManager
+from gemini_automation.parallel import ParallelGenerator
+
+
+async def main():
+    parser = argparse.ArgumentParser(description="Gemini image generation worker")
+    parser.add_argument("--prompts", nargs="+", required=True)
+    parser.add_argument("--account", type=str, default=None)
+    parser.add_argument("--accounts", type=str, default=None)  # comma-separated
+    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--max-concurrent", type=int, default=None)
+    args = parser.parse_args()
+
+    manager = AccountManager()
+    
+    if args.accounts:
+        account_names = [a.strip() for a in args.accounts.split(",")]
+    elif args.account:
+        account_names = [args.account]
+    else:
+        account_names = [manager.list_accounts()[0]["name"]]
+
+    generator = ParallelGenerator(
+        account_names=account_names,
+        output_dir=args.output_dir,
+        max_concurrent=args.max_concurrent or len(account_names),
+    )
+    
+    results = await generator.generate_batch(args.prompts)
+    print(json.dumps(results, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+```
+
+### 2. Tool Definitions (OpenCode)
+
+Create tool definitions that the AI can invoke. These go in `~/.config/opencode/tools/`:
+
+**`flow-generate.ts`**:
+
+```typescript
+import { tool } from "@opencode-ai/plugin"
+
+// Update this to your gemflow installation path
+const GEMFLOW_ROOT = "/path/to/gemflow"
+const WORKER_SCRIPT = `${GEMFLOW_ROOT}/flow_worker.py`
+
+export default tool({
+  description: "Generate images using Google Flow. Choose tier: ultra, pro, or all.",
+  args: {
+    prompts: tool.schema.array(tool.schema.string()).describe("Image prompts"),
+    tier: tool.schema.enum(["ultra", "pro", "all"]).describe("Account tier"),
+    outputDir: tool.schema.string().optional().describe("Output directory"),
+    projectName: tool.schema.string().optional().describe("Flow project name"),
+    referenceImage: tool.schema.string().optional().describe("Reference image path"),
+  },
+  async execute(args) {
+    const cmdArgs = [WORKER_SCRIPT, "--tier", args.tier, "--prompts", ...args.prompts]
+    if (args.outputDir) cmdArgs.push("--output-dir", args.outputDir)
+    if (args.projectName) cmdArgs.push("--project-name", args.projectName)
+    if (args.referenceImage) cmdArgs.push("--reference-image", args.referenceImage)
+
+    const proc = Bun.spawn(["python", ...cmdArgs], { cwd: GEMFLOW_ROOT, stdout: "pipe", stderr: "pipe" })
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+
+    return exitCode === 0 ? stdout.trim() : `Error (exit ${exitCode}):\n${stderr || stdout}`
+  },
+})
+```
+
+**`gemini-generate.ts`**:
+
+```typescript
+import { tool } from "@opencode-ai/plugin"
+
+const GEMFLOW_ROOT = "/path/to/gemflow"
+const WORKER_SCRIPT = `${GEMFLOW_ROOT}/gemini_worker.py`
+
+export default tool({
+  description: "Generate images using Google Gemini web automation.",
+  args: {
+    prompts: tool.schema.array(tool.schema.string()).describe("Image prompts"),
+    account: tool.schema.string().optional().describe("Account name"),
+    accounts: tool.schema.array(tool.schema.string()).optional().describe("Accounts for parallel mode"),
+    outputDir: tool.schema.string().optional().describe("Output directory"),
+    maxConcurrent: tool.schema.number().optional().describe("Max parallel browsers"),
+  },
+  async execute(args) {
+    const cmdArgs = [WORKER_SCRIPT, "--prompts", ...args.prompts]
+    if (args.outputDir) cmdArgs.push("--output-dir", args.outputDir)
+    if (args.accounts?.length) cmdArgs.push("--accounts", args.accounts.join(","))
+    else if (args.account) cmdArgs.push("--account", args.account)
+    if (args.maxConcurrent) cmdArgs.push("--max-concurrent", String(args.maxConcurrent))
+
+    const proc = Bun.spawn(["python", ...cmdArgs], { cwd: GEMFLOW_ROOT, stdout: "pipe", stderr: "pipe" })
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+    const exitCode = await proc.exited
+
+    return exitCode === 0 ? stdout.trim() : `Error (exit ${exitCode}):\n${stderr || stdout}`
+  },
+})
+```
+
+### 3. Skill Files (OpenCode)
+
+Skills teach the AI **when and how** to use the tools. Create these in `~/.config/opencode/skills/`:
+
+**`flow-image/SKILL.md`**:
+
+```markdown
+---
+name: flow-image
+description: Generate images using Google Flow. Use when user wants 4 images per prompt or tier-separated output.
+---
+
+## `flow-generate` tool
+
+**Basic usage:**
+\`\`\`json
+{ "prompts": ["a serene landscape", "a futuristic city"], "tier": "ultra" }
+\`\`\`
+
+**With reference image:**
+\`\`\`json
+{
+  "prompts": ["character in battle pose", "character menu screen"],
+  "tier": "ultra",
+  "referenceImage": "/path/to/style-reference.png"
+}
+\`\`\`
+
+## Output
+- 4 images per prompt
+- Saved to: `output/flow_{tier}/{prompt_folder}/`
+
+## When to use Flow vs Gemini
+- Flow: 4 images/prompt, project organization, reference images, tier system
+- Gemini: 1 image/prompt, simpler workflow
+```
+
+**`gemini-image/SKILL.md`**:
+
+```markdown
+---
+name: gemini-image
+description: Generate images using Google Gemini. Use when user wants single high-quality images.
+---
+
+## `gemini-generate` tool
+
+**Single account:**
+\`\`\`json
+{ "prompts": ["a watercolor sunset", "abstract geometric art"] }
+\`\`\`
+
+**Parallel (multiple accounts):**
+\`\`\`json
+{
+  "prompts": ["prompt1", "prompt2", "prompt3", "prompt4"],
+  "accounts": ["account-one", "account-two"]
+}
+\`\`\`
+
+## Output
+- 1 image per prompt
+- Saved to: `output/gemini_{prompt}_{timestamp}.png`
+```
+
+### 4. Directory Structure
+
+After setup, your config should look like:
+
+```
+~/.config/opencode/
+├── tools/
+│   ├── flow-generate.ts
+│   └── gemini-generate.ts
+├── skills/
+│   ├── flow-image/
+│   │   └── SKILL.md
+│   └── gemini-image/
+│       └── SKILL.md
+└── package.json          # Add @opencode-ai/plugin dependency
+```
+
+### 5. Installation
+
+```bash
+# In your opencode config directory
+cd ~/.config/opencode
+bun add @opencode-ai/plugin
+```
+
+### Usage with AI
+
+Once configured, you can ask your AI assistant:
+
+> "Generate 4 images of a cyberpunk cityscape using Flow"
+
+The AI will:
+1. Load the `flow-image` skill
+2. Call the `flow-generate` tool with appropriate parameters
+3. Return the generated image paths
+
+### Other AI Assistants
+
+For **Claude Code**, **Cline**, **Cursor**, or other MCP-compatible tools, adapt the tool definitions to their plugin format. The core pattern remains:
+
+1. **Worker script** — Python CLI that wraps the automation
+2. **Tool schema** — Defines parameters the AI can pass
+3. **Skill/instruction** — Teaches the AI when/how to use it
 
 ---
 
