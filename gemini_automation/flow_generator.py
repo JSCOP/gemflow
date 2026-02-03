@@ -329,15 +329,16 @@ class FlowImageGenerator:
         file_input = self.page.locator(self.config.selectors["reference_file_input"])
         try:
             await file_input.set_input_files(str(resolved))
-            await asyncio.sleep(3)  # Wait for upload + crop modal to appear
+            # Don't use fixed sleep - wait for crop modal instead
         except Exception as e:
             await self.page.keyboard.press("Escape")
             return f"Failed to upload reference image: {e}"
 
-        # Click "Crop and Save" on the crop modal (EN + KR)
+        # Wait for "Crop and Save" button (indicates upload complete + crop modal visible)
+        # Use longer timeout (30s) to handle large files
         crop_save = self.page.locator(self.config.selectors["crop_and_save"])
         try:
-            await crop_save.first.wait_for(state="visible", timeout=10_000)
+            await crop_save.first.wait_for(state="visible", timeout=30_000)
             await crop_save.first.click()
         except Exception:
             # Try cancel / escape if crop modal didn't appear
