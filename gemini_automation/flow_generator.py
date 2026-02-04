@@ -29,6 +29,8 @@ from pathlib import Path
 from playwright.async_api import Page
 
 from gemini_automation.flow_config import FlowConfig
+from gemini_automation.metadata import embed_png_metadata
+from gemini_automation.overlay import BrowserOverlay
 
 
 @dataclass
@@ -44,9 +46,12 @@ class FlowGenerationResult:
 class FlowImageGenerator:
     """Generates images on Google Flow by controlling the browser."""
 
-    def __init__(self, page: Page, config: FlowConfig) -> None:
+    def __init__(
+        self, page: Page, config: FlowConfig, overlay: BrowserOverlay | None = None
+    ) -> None:
         self.page = page
         self.config = config
+        self.overlay = overlay
         self._project_initialized = False
 
     async def _dismiss_consent_and_promos(self) -> None:
@@ -561,6 +566,13 @@ class FlowImageGenerator:
                 style/content reference.
         """
         try:
+            if self.overlay:
+                await self.overlay.update(
+                    status="Initializing project...",
+                    skip_enabled=True,
+                    next_enabled=False,
+                )
+
             # Ensure we have a project and are in Images mode
             init_error = await self._ensure_project()
             if init_error:
@@ -570,6 +582,8 @@ class FlowImageGenerator:
 
             # Upload reference image if provided
             if reference_image:
+                if self.overlay:
+                    await self.overlay.update(status="Uploading reference image...")
                 ref_error = await self._upload_reference_image(reference_image)
                 if ref_error:
                     return FlowGenerationResult(
@@ -604,6 +618,11 @@ class FlowImageGenerator:
                     error="Prompt textarea not found",
                 )
 
+            if self.overlay:
+                await self.overlay.update(
+                    status=f"Sending: {prompt[:60]}{'…' if len(prompt) > 60 else ''}",
+                )
+
             await textarea.click()
             # Clear existing text first
             await textarea.fill("")
@@ -630,8 +649,22 @@ class FlowImageGenerator:
             new_image_urls: list[str] = []
 
             while elapsed < timeout_s:
+                # Check skip before sleeping
+                if self.overlay and self.overlay.check_skip():
+                    return FlowGenerationResult(
+                        prompt=prompt,
+                        success=False,
+                        error="Skipped by user",
+                    )
+
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
+
+                if self.overlay:
+                    await self.overlay.update(
+                        status="Waiting for images...",
+                        sub=f"⏳ {elapsed:.0f}s / {timeout_s:.0f}s",
+                    )
 
                 if not self._is_page_alive():
                     return FlowGenerationResult(
@@ -742,6 +775,15 @@ class FlowImageGenerator:
                 f"[{i}/{total}] Generating: {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
             )
 
+            if self.overlay:
+                await self.overlay.update(
+                    progress=f"{i} / {total}",
+                    status=f"Starting: {prompt[:50]}{'…' if len(prompt) > 50 else ''}",
+                    sub="",
+                    skip_enabled=True,
+                    next_enabled=False,
+                )
+
             if not self._is_page_alive():
                 print("  ✗ Browser closed — skipping remaining prompts")
                 for remaining in prompts[i - 1 :]:
@@ -758,6 +800,8 @@ class FlowImageGenerator:
             #  - First prompt: full file upload (crop + attach)
             #  - Subsequent prompts: re-pick from ingredient picker (instant)
             if reference_image and ref_uploaded:
+                if self.overlay:
+                    await self.overlay.update(status="Re-attaching reference image...")
                 reattach_err = await self._reattach_reference_from_picker()
                 if reattach_err:
                     print(f"  Warning: {reattach_err}")
@@ -766,8 +810,6 @@ class FlowImageGenerator:
             result = await self.generate(prompt, reference_image=ref_for_this)
             if reference_image and not ref_uploaded and result.success:
                 ref_uploaded = True
-                # URL is now captured during upload via before/after diff
-                # No fallback capture needed here
 
             if result.success:
                 print(f"  ✓ Got {len(result.image_urls)} image(s)")
@@ -780,7 +822,25 @@ class FlowImageGenerator:
             if i < total:
                 delay = random.uniform(self.config.min_delay, self.config.max_delay)
                 print(f"  Waiting {delay:.1f}s before next prompt...")
-                await asyncio.sleep(delay)
+
+                if self.overlay:
+                    await self.overlay.update(
+                        status=f"✓ Done — waiting {delay:.0f}s",
+                        sub="Click Next to skip wait",
+                        skip_enabled=False,
+                        next_enabled=True,
+                    )
+                    await self.overlay.wait_for_next_or_timeout(delay)
+                else:
+                    await asyncio.sleep(delay)
+
+        if self.overlay:
+            await self.overlay.update(
+                status="✅ Batch complete",
+                sub=f"{total} prompts processed",
+                skip_enabled=False,
+                next_enabled=False,
+            )
 
         return results
 
@@ -817,7 +877,7 @@ class FlowImageDownloader:
                 print(f"  Warning: Empty response for {url[:80]}")
                 return None
 
-            filepath.write_bytes(body)
+            filepath.write_bytes(embed_png_metadata(body, prompt))
             return filepath
 
         except Exception as e:

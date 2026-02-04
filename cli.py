@@ -12,6 +12,7 @@ from gemini_automation.config import Config
 from gemini_automation.browser import BrowserManager
 from gemini_automation.generator import ImageGenerator
 from gemini_automation.downloader import ImageDownloader
+from gemini_automation.overlay import BrowserOverlay
 
 
 async def cmd_login(config: Config) -> int:
@@ -68,7 +69,10 @@ async def cmd_generate(
             print("Error: Not logged in. Run 'python cli.py login' first.")
             return 1
 
-        generator = ImageGenerator(page, config)
+        overlay = BrowserOverlay(page)
+        await overlay.inject()
+
+        generator = ImageGenerator(page, config, overlay=overlay)
         downloader = ImageDownloader(page, config)
 
         # Generate images

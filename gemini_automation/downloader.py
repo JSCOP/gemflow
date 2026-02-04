@@ -10,6 +10,7 @@ from playwright.async_api import Page
 
 from gemini_automation.config import Config
 from gemini_automation.generator import GenerationResult
+from gemini_automation.metadata import embed_png_metadata
 
 
 def sanitize_filename(text: str, max_length: int = 50) -> str:
@@ -62,7 +63,7 @@ class ImageDownloader:
                 print(f"  Warning: Empty response for {url[:80]}")
                 return None
 
-            filepath.write_bytes(body)
+            filepath.write_bytes(embed_png_metadata(body, prompt))
             return filepath
 
         except Exception as e:

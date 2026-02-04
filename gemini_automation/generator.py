@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from playwright.async_api import Page
 
 from gemini_automation.config import Config
+from gemini_automation.overlay import BrowserOverlay
 
 
 @dataclass
@@ -23,9 +24,12 @@ class GenerationResult:
 class ImageGenerator:
     """Generates images on Gemini by controlling the browser."""
 
-    def __init__(self, page: Page, config: Config) -> None:
+    def __init__(
+        self, page: Page, config: Config, overlay: BrowserOverlay | None = None
+    ) -> None:
         self.page = page
         self.config = config
+        self.overlay = overlay
 
     async def _activate_create_images_tool(self) -> str | None:
         """Click Tools → Create images to activate image generation mode.
@@ -111,6 +115,13 @@ class ImageGenerator:
             # Navigate to new chat
             await self.page.goto(self.config.gemini_url, wait_until="domcontentloaded")
 
+            if self.overlay:
+                await self.overlay.update(
+                    status="Loading page...",
+                    skip_enabled=True,
+                    next_enabled=False,
+                )
+
             # Wait for textarea
             textarea = self.page.locator(self.config.selectors["textarea"])
             try:
@@ -125,6 +136,9 @@ class ImageGenerator:
             # Dismiss any promo dialogs that may block interaction
             await self._dismiss_promo_dialogs()
 
+            if self.overlay:
+                await self.overlay.update(status="Activating image tool...")
+
             # Activate "Create images" tool BEFORE entering prompt.
             # Without this, Gemini generates text instead of images.
             tool_error = await self._activate_create_images_tool()
@@ -135,6 +149,11 @@ class ImageGenerator:
                     error=f"Failed to activate image tool: {tool_error}",
                 )
 
+            if self.overlay:
+                await self.overlay.update(
+                    status=f"Sending: {prompt[:60]}{'…' if len(prompt) > 60 else ''}",
+                )
+
             # Enter prompt and send
             await textarea.click()
             await textarea.fill(prompt)
@@ -142,13 +161,6 @@ class ImageGenerator:
             await self.page.keyboard.press("Enter")
 
             # Wait for REAL generated images (not UI thumbnails/avatars).
-            # Generated images are large (naturalWidth >= 256) whereas
-            # sidebar thumbnails are 160x160 and avatars are 64x64.
-            #
-            # Detection strategy:
-            # - "Stop response" button visible → still generating
-            # - "Good response" button visible → response complete
-            # - If response complete + no large images → text-only (refusal)
             min_dim = 256
             poll_interval = 5.0
             timeout_s = self.config.generation_timeout / 1000
@@ -156,8 +168,22 @@ class ImageGenerator:
             image_urls: list[str] = []
 
             while elapsed < timeout_s:
+                # Check skip before sleeping
+                if self.overlay and self.overlay.check_skip():
+                    return GenerationResult(
+                        prompt=prompt,
+                        success=False,
+                        error="Skipped by user",
+                    )
+
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
+
+                if self.overlay:
+                    await self.overlay.update(
+                        status="Waiting for images...",
+                        sub=f"⏳ {elapsed:.0f}s / {timeout_s:.0f}s",
+                    )
 
                 # Guard: check page is still alive
                 if not self._is_page_alive():
@@ -270,6 +296,15 @@ class ImageGenerator:
                 f"[{i}/{total}] Generating: {prompt[:50]}{'...' if len(prompt) > 50 else ''}"
             )
 
+            if self.overlay:
+                await self.overlay.update(
+                    progress=f"{i} / {total}",
+                    status=f"Starting: {prompt[:50]}{'…' if len(prompt) > 50 else ''}",
+                    sub="",
+                    skip_enabled=True,
+                    next_enabled=False,
+                )
+
             # Guard: abort remaining prompts if browser died
             if not self._is_page_alive():
                 print("  ✗ Browser closed — skipping remaining prompts")
@@ -296,6 +331,24 @@ class ImageGenerator:
             if i < total:
                 delay = random.uniform(self.config.min_delay, self.config.max_delay)
                 print(f"  Waiting {delay:.1f}s before next prompt...")
-                await asyncio.sleep(delay)
+
+                if self.overlay:
+                    await self.overlay.update(
+                        status=f"✓ Done — waiting {delay:.0f}s",
+                        sub="Click Next to skip wait",
+                        skip_enabled=False,
+                        next_enabled=True,
+                    )
+                    await self.overlay.wait_for_next_or_timeout(delay)
+                else:
+                    await asyncio.sleep(delay)
+
+        if self.overlay:
+            await self.overlay.update(
+                status="✅ Batch complete",
+                sub=f"{total} prompts processed",
+                skip_enabled=False,
+                next_enabled=False,
+            )
 
         return results
